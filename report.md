@@ -1,7 +1,6 @@
 # 期末報告 — AIASE 2026 Final Project
 
-> 學生:`<your_name>` / GitHub: `<github_id>`
-> (兩人組請於此區同列兩位成員姓名 + GitHub ID)
+> 學生:`劉宇昕` / GitHub: `uab0`
 
 ---
 

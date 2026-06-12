@@ -34,6 +34,16 @@ RESULTS_DIR = REPO_ROOT / "dev_run_results"
 
 HERMES_BIN = os.environ.get("HERMES_BIN", "hermes")
 HERMES_TIMEOUT_SEC = int(os.environ.get("HERMES_TIMEOUT_SEC", "120"))
+HERMES_QUIET = os.environ.get("HERMES_QUIET", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+HERMES_PRELOAD_SKILL = os.environ.get("HERMES_PRELOAD_SKILL", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +55,8 @@ _FENCED_JSON_RE = re.compile(
     r"```json[ \t]*\r?\n(?P<body>.*?)\r?\n```",
     re.DOTALL | re.IGNORECASE,
 )
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def extract_last_json_block(stdout: str) -> Optional[dict]:
@@ -62,12 +74,32 @@ def extract_last_json_block(stdout: str) -> Optional[dict]:
     """
     if not isinstance(stdout, str):
         return None
+    stdout = _ANSI_RE.sub("", stdout)
     matches = _FENCED_JSON_RE.findall(stdout)
-    if not matches:
+    if matches:
+        body = matches[-1].strip()
+        try:
+            obj = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(obj, dict):
+            return None
+        return obj
+
+    # Hermes sometimes renders the assistant's final message as a JSON channel
+    # instead of preserving Markdown fences. Keep this fallback narrowly scoped
+    # to that explicit channel marker so arbitrary prose is still rejected.
+    marker = "<channel|>json"
+    idx = stdout.rfind(marker)
+    if idx == -1:
         return None
-    body = matches[-1].strip()
+    tail = stdout[idx + len(marker):]
+    start = tail.find("{")
+    if start == -1:
+        return None
+    decoder = json.JSONDecoder()
     try:
-        obj = json.loads(body)
+        obj, _ = decoder.raw_decode(tail[start:])
     except json.JSONDecodeError:
         return None
     if not isinstance(obj, dict):
@@ -170,7 +202,14 @@ class HermesResult:
 
 def call_hermes_skill(slash_command: str, payload: dict) -> HermesResult:
     """
-    呼叫 `hermes chat --toolsets skills -q '<slash_command> <payload_json>'`。
+    呼叫正式評分路徑:
+    `hermes chat -Q --toolsets skills,terminal --yolo -q '<slash_command> <payload_json>'`。
+
+    設定 HERMES_QUIET=0 時,可關閉 `-Q` 以對照老師公告的原始指令。
+
+    設定 HERMES_PRELOAD_SKILL=1 時,改用本地除錯路徑:
+    `hermes chat -Q --toolsets skills,terminal --yolo --skills <skill> -q '<payload_json>'`。
+    預設仍維持 slash-command 路徑。
 
     若 hermes 不在 PATH,回傳 ok=False 並標註 error,呼叫端可決定要 skip 還是 fail。
     """
@@ -181,8 +220,27 @@ def call_hermes_skill(slash_command: str, payload: dict) -> HermesResult:
         )
 
     payload_str = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    arg = f"{slash_command} {payload_str}"
-    cmd = [HERMES_BIN, "chat", "--toolsets", "skills", "-q", arg]
+    skill_name = slash_command.lstrip("/")
+    if HERMES_PRELOAD_SKILL:
+        arg = payload_str
+        cmd = [
+            HERMES_BIN,
+            "chat",
+            "--skills", skill_name,
+        ]
+    else:
+        arg = f"{slash_command} {payload_str}"
+        cmd = [
+            HERMES_BIN,
+            "chat",
+        ]
+    if HERMES_QUIET:
+        cmd.append("-Q")
+    cmd.extend([
+        "--toolsets", "skills,terminal",
+        "--yolo",
+        "-q", arg,
+    ])
 
     t0 = time.time()
     try:

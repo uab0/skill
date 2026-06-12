@@ -65,3 +65,25 @@ def test_unicode_content():
 def test_none_input():
     assert extract_last_json_block(None) is None  # type: ignore[arg-type]
     assert extract_last_json_block(123) is None  # type: ignore[arg-type]
+
+
+def test_hermes_json_channel_fallback():
+    s = '''╭─ Hermes ─╮
+    <|channel>thought
+    <channel|>json
+    {
+      "task_id": "x",
+      "sql": "SELECT 1"
+    }
+╰───────────╯
+'''
+    assert extract_last_json_block(s) == {"task_id": "x", "sql": "SELECT 1"}
+
+
+def test_hermes_json_channel_takes_last():
+    s = '''<channel|>json
+{"task_id": "x", "sql": "SELECT bad"}
+<channel|>json
+{"task_id": "x", "sql": "SELECT good"}
+'''
+    assert extract_last_json_block(s) == {"task_id": "x", "sql": "SELECT good"}

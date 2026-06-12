@@ -7,9 +7,9 @@
 ```markdown
 roles:
   - role: code-author
-    skill_path: skills/code-author-<github_id>/
+    skill_path: skills/code-author-uab0/
   - role: bug-hunter
-    skill_path: skills/bug-hunter-<github_id>/
+    skill_path: skills/bug-hunter-uab0/
 ```
 
 ## 規則

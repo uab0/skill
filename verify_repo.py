@@ -161,21 +161,55 @@ def check_pairwise_role(rep: Report) -> None:
         rep.add("pairwise-role:exists", False, "PAIRWISE_ROLE.md missing")
         return
     text = _read(p)
-    role_m = re.search(r"^role:\s*(code-author|bug-hunter)\s*$", text, re.MULTILINE)
-    path_m = re.search(r"^skill_path:\s*(\S+)\s*$", text, re.MULTILINE)
-    if not role_m:
-        rep.add("pairwise-role:role", False, "role line missing or invalid")
-        return
-    rep.add("pairwise-role:role", True, role_m.group(1))
-    if not path_m:
-        rep.add("pairwise-role:skill_path", False, "skill_path line missing")
-        return
-    sp = path_m.group(1).rstrip("/")
-    target = REPO_ROOT / sp
-    if not target.is_dir():
-        rep.add("pairwise-role:skill_path", False, f"path not a directory: {sp}")
-        return
-    rep.add("pairwise-role:skill_path", True, sp)
+    pairs: list[tuple[str, str]] = []
+    current_role = ""
+
+    for line in text.splitlines():
+        role_m = re.match(r"^\s*-?\s*role:\s*(code-author|bug-hunter)\s*$", line)
+        if role_m:
+            current_role = role_m.group(1)
+            continue
+        path_m = re.match(r"^\s*skill_path:\s*(\S+)\s*$", line)
+        if path_m and current_role:
+            pairs.append((current_role, path_m.group(1).rstrip("/")))
+            current_role = ""
+
+    roles = [role for role, _ in pairs]
+    expected = {"code-author", "bug-hunter"}
+    role_counts = {role: roles.count(role) for role in expected}
+    missing = sorted(role for role in expected if role_counts[role] == 0)
+    duplicates = sorted(role for role in expected if role_counts[role] > 1)
+
+    rep.add(
+        "pairwise-role:both-roles",
+        not missing and not duplicates and len(pairs) == 2,
+        f"pairs={pairs}; missing={missing}; duplicates={duplicates}" if missing or duplicates or len(pairs) != 2 else "",
+    )
+
+    seen_paths: set[str] = set()
+    for role, sp in pairs:
+        target = REPO_ROOT / sp
+        ok = target.is_dir()
+        detail = sp if ok else f"path not a directory: {sp}"
+        rep.add(f"pairwise-role:{role}:skill_path", ok, detail)
+        seen_paths.add(sp)
+
+        skill_md = target / "SKILL.md"
+        if ok and skill_md.exists():
+            fm_name = _frontmatter_name(skill_md)
+            rep.add(
+                f"pairwise-role:{role}:skill_name",
+                fm_name == target.name,
+                f"name={fm_name}; folder={target.name}",
+            )
+        elif ok:
+            rep.add(f"pairwise-role:{role}:skill_name", False, "SKILL.md missing")
+
+    rep.add(
+        "pairwise-role:unique-paths",
+        len(seen_paths) == len(pairs),
+        f"paths={sorted(seen_paths)}" if len(seen_paths) != len(pairs) else "",
+    )
 
 
 def check_no_absolute_paths(rep: Report) -> None:
@@ -186,11 +220,13 @@ def check_no_absolute_paths(rep: Report) -> None:
         if any(part in (".git", "__pycache__", "dev_run_results", "node_modules", ".venv", "venv")
                for part in path.parts):
             continue
+        if "ref" in path.relative_to(REPO_ROOT).parts:
+            continue
         if path.suffix in (".sqlite", ".sqlite3", ".db", ".png", ".jpg", ".pdf"):
             continue
         # 跳過自己 + 含路徑範例的檔案(verify_repo.py 內有 regex pattern;
         # hermes-config.example.yaml 與 README.md 有 placeholder 絕對路徑示例)
-        if path.name in ("verify_repo.py", "hermes-config.example.yaml", "README.md"):
+        if path.name in ("verify_repo.py", "verify_report.json", "hermes-config.example.yaml", "README.md"):
             continue
         text = _read(path)
         for pat in ABSOLUTE_PATH_PATTERNS:
@@ -211,7 +247,7 @@ def check_no_tokens(rep: Report) -> None:
             continue
         if path.suffix in (".sqlite", ".sqlite3", ".db"):
             continue
-        if path.name == "verify_repo.py":
+        if path.name in ("verify_repo.py", "verify_report.json"):
             continue
         text = _read(path)
         for pat in TOKEN_PATTERNS:
