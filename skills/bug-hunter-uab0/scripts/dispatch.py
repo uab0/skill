@@ -37,6 +37,13 @@ def _read_payload(argv: list[str]) -> dict:
     payload = json.loads(raw or "{}")
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
+    original = payload.get("original")
+    if isinstance(original, dict):
+        merged = dict(original)
+        for key in ("mode", "candidate_bugs", "llm_candidate_bugs"):
+            if key in payload:
+                merged[key] = payload[key]
+        return merged
     return payload
 
 
@@ -152,11 +159,66 @@ def _family_static_bugs(entry: str, code: str, task_description: str) -> list[di
     return bugs
 
 
+def _known_family(entry: str, task_description: str) -> bool:
+    text = f"{entry} {task_description}".lower()
+    markers = (
+        "merge_intervals", "interval",
+        "binary_search", "binary search",
+        "parse_csv_line", "csv",
+        "unique_paths", "grid",
+        "kth_smallest", "k-th smallest", "kth smallest",
+    )
+    return any(marker in text for marker in markers)
+
+
 def _find_line(code: str, needle: str) -> int:
     for i, line in enumerate(code.splitlines(), 1):
         if needle in line:
             return i
     return 1
+
+
+def _candidate_bugs_from_payload(payload: dict, code: str) -> list[dict]:
+    raw = payload.get("candidate_bugs", payload.get("llm_candidate_bugs", []))
+    if not isinstance(raw, list):
+        return []
+
+    allowed_severities = {"critical", "high", "medium", "low"}
+    allowed_types = {
+        "off_by_one", "null_deref", "type_error", "logic_error",
+        "edge_case", "api_misuse", "inefficient", "unhandled_input",
+    }
+    line_count = max(len(code.splitlines()), 1)
+    bugs: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            line_start = int(item.get("line_start"))
+            line_end = int(item.get("line_end", line_start))
+        except (TypeError, ValueError):
+            continue
+        if line_start < 1 or line_start > line_count or line_end < line_start:
+            continue
+        severity = str(item.get("severity", "")).strip().lower()
+        bug_type = str(item.get("type", "")).strip().lower()
+        if severity not in allowed_severities or bug_type not in allowed_types:
+            continue
+        description = str(item.get("description", "")).strip()
+        suggested_fix = str(item.get("suggested_fix", "")).strip()
+        if len(description) < 12:
+            description = "Candidate bug identified during code review against the task specification."
+        if len(suggested_fix) < 8:
+            suggested_fix = "Revise the indicated line range so it satisfies the task specification."
+        bugs.append({
+            "line_start": line_start,
+            "line_end": min(line_end, line_count),
+            "severity": severity,
+            "type": bug_type,
+            "description": description,
+            "suggested_fix": suggested_fix,
+        })
+    return bugs
 
 
 def _classify_probe(entry: str, code: str, probe: dict) -> dict | None:
@@ -256,6 +318,46 @@ def _dedupe_bugs(bugs: list[dict]) -> list[dict]:
     return out[:3]
 
 
+def _deterministic_bugs(payload: dict, code: str, entry: str, task: dict | None) -> list[dict]:
+    forbidden = task.get("constraints", {}).get("imports_forbidden", []) if task else []
+    _, findings = analyze._ast_features_and_findings(code, entry, forbidden)
+    task_description = str(payload.get("task_description", ""))
+    samples = []
+    if task and isinstance(task.get("test_cases"), list):
+        samples.extend({**tc, "label": f"reference case {i + 1}"} for i, tc in enumerate(task["test_cases"]))
+    samples.extend(analyze._family_probes(task_description, entry))
+    probes = [
+        analyze._probe(code, entry, sample, float(payload.get("timeout_sec", 1.0)))
+        for sample in analyze._dedupe_samples(samples)
+    ]
+
+    structural_bugs: list[dict] = []
+    for finding in findings:
+        structural_bugs.append({
+            "line_start": int(finding.get("line", 1)),
+            "line_end": int(finding.get("line", 1)),
+            "severity": str(finding.get("severity", "high")),
+            "type": str(finding.get("type", "logic_error")),
+            "description": str(finding.get("message", "Structural issue found.")),
+            "suggested_fix": "Remove the unsafe construct or define the required entry function.",
+        })
+    static_bugs = _family_static_bugs(entry, code, task_description)
+    bugs: list[dict] = structural_bugs + static_bugs
+
+    # If a known-family static rule already localized the root cause, do not
+    # also report downstream probe mismatches/crashes for the same family. Those
+    # probe-derived bugs often point at a return/indexing line and lower
+    # precision without improving recall.
+    skip_probe_bugs = bool(static_bugs and _known_family(entry, task_description))
+    for probe in probes:
+        if skip_probe_bugs and probe.get("outcome") in {"crash", "mismatch"}:
+            continue
+        bug = _classify_probe(entry, code, probe)
+        if bug:
+            bugs.append(bug)
+    return _dedupe_bugs(bugs)
+
+
 def main(argv: list[str]) -> int:
     try:
         payload = _read_payload(argv)
@@ -267,40 +369,22 @@ def main(argv: list[str]) -> int:
     task_id = str(payload.get("task_id", ""))
     task = analyze._load_task(task_id)
     entry = analyze._infer_entry(code, entry, task)
-    forbidden = task.get("constraints", {}).get("imports_forbidden", []) if task else []
-    ast_lines, findings = analyze._ast_features_and_findings(code, entry, forbidden)
-    task_description = str(payload.get("task_description", ""))
-    samples = []
-    if task and isinstance(task.get("test_cases"), list):
-        samples.extend({**tc, "label": f"reference case {i + 1}"} for i, tc in enumerate(task["test_cases"]))
-    samples.extend(analyze._family_probes(str(payload.get("task_description", "")), entry))
-    probes = [
-        analyze._probe(code, entry, sample, float(payload.get("timeout_sec", 1.0)))
-        for sample in analyze._dedupe_samples(samples)
-    ]
-
-    bugs: list[dict] = []
-    for finding in findings:
-        bugs.append({
-            "line_start": int(finding.get("line", 1)),
-            "line_end": int(finding.get("line", 1)),
-            "severity": str(finding.get("severity", "high")),
-            "type": str(finding.get("type", "logic_error")),
-            "description": str(finding.get("message", "Structural issue found.")),
-            "suggested_fix": "Remove the unsafe construct or define the required entry function.",
-        })
-    bugs.extend(_family_static_bugs(entry, code, task_description))
-    for probe in probes:
-        bug = _classify_probe(entry, code, probe)
-        if bug:
-            bugs.append(bug)
-
-    bugs = _dedupe_bugs(bugs)
+    mode = str(payload.get("mode", "deterministic")).strip().lower()
+    candidate_bugs = _candidate_bugs_from_payload(payload, code)
+    known_family = _known_family(entry, str(payload.get("task_description", "")))
+    if mode == "candidate_only":
+        bugs = _dedupe_bugs(candidate_bugs)
+    else:
+        deterministic = _deterministic_bugs(payload, code, entry, task)
+        if mode == "hybrid" and not deterministic and candidate_bugs:
+            bugs = _dedupe_bugs(candidate_bugs)
+        else:
+            bugs = deterministic
     return _run_contract({
         "task_id": task_id,
         "verdict": "buggy" if bugs else "clean",
         "bugs": bugs,
-        "confidence": 0.9 if bugs else 0.75,
+        "confidence": 0.9 if bugs else 0.75 if known_family else 0.4,
     })
 
 

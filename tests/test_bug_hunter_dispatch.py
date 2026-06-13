@@ -63,3 +63,43 @@ def test_dispatch_clean_on_reference_clean_code():
         })
         assert out["verdict"] == "clean", (task["task_id"], out)
         assert out["bugs"] == []
+
+
+def test_dispatch_suppresses_known_family_probe_duplicates():
+    for task_id in ("task_pair_004", "task_pair_005"):
+        task = _load(task_id)
+        out = _run_dispatch({
+            "task_id": task["task_id"],
+            "task_description": task["task_description"],
+            "constraints": task["constraints"],
+            "code": task["buggy_code"],
+        })
+        assert _bug_keys(out) == _ground_truth_keys(task)
+
+
+def test_hybrid_uses_candidate_bugs_for_unknown_clean_low_confidence():
+    payload = {
+        "original": {
+            "task_id": "custom_abs_001",
+            "task_description": (
+                "Implement absolute_value(x): return the non-negative absolute value "
+                "of integer x. For negative x, return -x; otherwise return x."
+            ),
+            "constraints": {"entry_function": "absolute_value", "max_loc": 500, "imports_forbidden": []},
+            "code": "def absolute_value(x):\n    return x\n",
+        },
+        "mode": "hybrid",
+        "candidate_bugs": [
+            {
+                "line_start": 2,
+                "line_end": 2,
+                "severity": "high",
+                "type": "logic_error",
+                "description": "Returns negative inputs unchanged instead of negating them.",
+                "suggested_fix": "Return -x for negative inputs.",
+            }
+        ],
+    }
+    out = _run_dispatch(payload)
+    assert out["verdict"] == "buggy"
+    assert _bug_keys(out) == {(2, "logic_error")}
