@@ -1,75 +1,33 @@
 ---
 name: bug-hunter-uab0
-description: Audit a Python function for bugs against its task description, emit a structured bug report per the AIASE 2026 Pairwise Bug Hunter contract.
-version: 0.2.0
+description: Run the bug-hunter dispatcher script and return its fenced JSON contract verbatim. Do not audit manually.
+version: 0.3.1
 metadata:
   hermes:
     tags: [code, audit, aiase-2026]
     category: code
 ---
 
-# Bug Hunter Skill (Pairwise Track)
+# Bug Hunter Skill
 
 ## When to Use
 
-Use this skill when the input JSON contains `task_id`, `code`, and `task_description`. The skill must return a structured bug report with precise line numbers and low false-positive rate.
+Use when the input JSON contains `task_id`, `task_description`, and `code`.
 
 ## Procedure
 
-1. Parse `task_id`, `code`, and `task_description`.
-2. Read the input `code` line-by-line. Line numbers are 1-indexed, and blank/comment lines count.
-3. Run deterministic analysis from the repo root:
+Manual review is invalid for this skill. Do not explain bugs yourself, do not provide corrected code, and do not answer in prose.
+
+Run the dispatcher exactly once:
 
 ```bash
-python skills/bug-hunter-uab0/scripts/analyze.py '{"task_id":"<task_id>","code":"<code>","task_description":"<task description>"}'
+python skills/bug-hunter-uab0/scripts/dispatch.py <<'JSON'
+<INPUT_JSON>
+JSON
 ```
 
-4. Review the analyzer evidence:
-   - parse/compile status;
-   - entry function status;
-   - forbidden import or dangerous construct findings;
-   - reproducible crashes, mismatches, or timeouts;
-   - traceback-localized candidate lines;
-   - suspicious AST lines.
-5. Report `buggy` only when there is clear evidence:
-   - compile/import failure;
-   - forbidden or dangerous construct;
-   - reproducible crash;
-   - reproducible mismatch against a provided/reference oracle;
-   - timeout on a small deterministic probe;
-   - clear AST-localized spec violation.
-6. If evidence is weak or only stylistic, prefer `verdict="clean"` and `bugs=[]`.
-7. For each bug, choose:
-   - the smallest relevant `line_start`/`line_end`;
-   - one allowed `type`;
-   - calibrated `severity`;
-   - a specific description and suggested fix.
-8. Final action: run this exact command from the repo root and return its Markdown fenced JSON block unchanged:
-
-```bash
-python skills/bug-hunter-uab0/scripts/run.py '{"task_id":"<same task_id>","verdict":"clean","bugs":[],"confidence":0.0}'
-```
-
-Paste the wrapper output exactly, including the opening ```json fence and closing ``` fence. Do not answer in a special JSON channel, plain JSON object, prose, table, or YAML.
-
-## Pitfalls
-
-- False positives on clean code are penalized. Do not report speculative bugs.
-- Do not point at the function signature when a specific loop/index/return line causes the issue.
-- Empty-input crashes are usually `edge_case` with `medium` severity.
-- Common-input wrong answers are usually `logic_error` or `off_by_one` with `high` severity.
-- Style-only or theoretical performance concerns should usually be `clean`, unless the task explicitly requires performance and the code likely times out.
-- If `verdict=clean`, `bugs` must be `[]`.
+Copy the dispatcher's stdout verbatim as the final answer. Do not inspect, summarize, repair, rewrite, or add prose. Do not run any other command.
 
 ## Verification
 
-The final output must be the single last Markdown fenced ```json``` block printed by `scripts/run.py`, with:
-
-- `task_id`
-- `verdict`, either `"buggy"` or `"clean"`
-- `bugs`, empty when clean
-- `confidence`
-
-Each bug object must contain `line_start`, `line_end`, `severity`, `type`, `description`, and `suggested_fix`.
-
-Do not add any reasoning or another fenced JSON block after the final contract.
+The final JSON object must contain `task_id`, `verdict`, `bugs`, and `confidence`.

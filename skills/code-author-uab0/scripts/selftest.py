@@ -15,7 +15,9 @@ structural violations.
 from __future__ import annotations
 
 import ast
+import csv
 import json
+import math
 import signal
 import subprocess
 import sys
@@ -23,6 +25,16 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+
+DEFAULT_FORBIDDEN_IMPORTS = {
+    "os", "sys", "subprocess", "multiprocessing", "threading", "socket",
+    "requests", "urllib", "pathlib", "importlib",
+}
+DEFAULT_DANGEROUS_CALLS = {
+    "eval", "exec", "__import__", "open", "compile", "input",
+    "globals", "locals", "vars",
+}
 
 
 class _Timeout(Exception):
@@ -104,7 +116,7 @@ def find_import_violations(code: str, forbidden: list[str]) -> list[str]:
     tree, err = _parse_tree(code)
     if tree is None:
         return [err]
-    forbidden_set = {f.strip() for f in forbidden if f.strip()}
+    forbidden_set = DEFAULT_FORBIDDEN_IMPORTS | {f.strip() for f in forbidden if f.strip()}
     found: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -135,10 +147,15 @@ def structural_violations(code: str, entry: str, forbidden: list[str]) -> list[s
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             name = _call_name(node)
-            if name in {"eval", "exec", "__import__", "open", "compile"}:
+            if name in DEFAULT_DANGEROUS_CALLS:
                 violations.append(f"dangerous call at line {node.lineno}: {name}")
-            if name.startswith("importlib.") or name in {"import_module", "subprocess.run", "subprocess.Popen"}:
+            if name.startswith("importlib.") or name in {
+                "import_module", "subprocess.run", "subprocess.Popen",
+                "getattr", "setattr", "delattr",
+            }:
                 violations.append(f"dynamic/process call at line {node.lineno}: {name}")
+        if isinstance(node, (ast.For, ast.While, ast.With, ast.Try)) and isinstance(getattr(node, "parent", None), ast.Module):
+            violations.append(f"top-level executable block at line {node.lineno}: {type(node).__name__}")
     return sorted(set(violations))
 
 
@@ -161,12 +178,17 @@ def _call_name(node: ast.Call) -> str:
 def generated_samples(task_description: str, entry: str) -> list[dict[str, Any]]:
     text = f"{entry} {task_description}".lower()
     if "merge_intervals" in text or "interval" in text:
+        base = [[5, 7], [1, 3], [2, 4], [4, 4], [-2, -1], [-1, 0]]
+        merged_base = _merge_intervals_oracle(base)
         return [
             {"input": [[]], "expected": [], "label": "empty intervals"},
             {"input": [[[1, 3]]], "expected": [[1, 3]], "label": "singleton interval"},
             {"input": [[[1, 3], [2, 4]]], "expected": [[1, 4]], "label": "overlap"},
             {"input": [[[1, 2], [2, 3], [3, 5]]], "expected": [[1, 5]], "label": "touching"},
             {"input": [[[5, 7], [1, 3], [2, 4]]], "expected": [[1, 4], [5, 7]], "label": "unsorted"},
+            {"input": [base], "expected": merged_base, "label": "negative endpoints and permutation"},
+            {"input": [merged_base], "expected": merged_base, "label": "idempotence on merged output"},
+            {"input": [[[1, 1], [1, 1], [2, 2]]], "expected": [[1, 1], [2, 2]], "label": "duplicate zero-width intervals"},
         ]
     if "binary_search" in text or "binary search" in text:
         return [
@@ -175,31 +197,83 @@ def generated_samples(task_description: str, entry: str) -> list[dict[str, Any]]
             {"input": [[5], 7], "expected": -1, "label": "singleton missing"},
             {"input": [[1, 2, 3, 4, 5], 1], "expected": 0, "label": "first"},
             {"input": [[1, 2, 3, 4, 5], 5], "expected": 4, "label": "last"},
+            {"input": [[1, 2, 4, 8, 16], 3], "expected": -1, "label": "middle absent"},
+            {"input": [[-5, -2, 0, 4], -5], "expected": 0, "label": "negative first"},
+            {"input": [[1, 2, 2, 2, 3], 2], "expected_any_index_value": 2, "label": "duplicates any matching index"},
         ]
     if "parse_csv_line" in text or "csv" in text:
-        return [
-            {"input": [""], "expected": [""], "label": "empty record"},
-            {"input": ["a,,b"], "expected": ["a", "", "b"], "label": "empty field"},
-            {"input": ['a,"b,c",d'], "expected": ["a", "b,c", "d"], "label": "quoted comma"},
-            {"input": ['"hello ""world"""'], "expected": ['hello "world"'], "label": "escaped quote"},
+        lines = [
+            ("empty record", ""),
+            ("empty field", "a,,b"),
+            ("trailing comma", "a,b,"),
+            ("quoted comma", 'a,"b,c",d'),
+            ("escaped quote", '"hello ""world"""'),
+            ("quoted empty", '"",x'),
+            ("two quoted fields", '"a","b"'),
         ]
+        return [{"input": [line], "expected": _csv_oracle(line), "label": label} for label, line in lines]
     if "unique_paths" in text or "grid" in text:
+        dims = [
+            ("zero m", 0, 5),
+            ("zero n", 5, 0),
+            ("one cell", 1, 1),
+            ("one row", 1, 5),
+            ("one column", 5, 1),
+            ("2x2", 2, 2),
+            ("3x3", 3, 3),
+            ("3x7", 3, 7),
+        ]
         return [
-            {"input": [0, 5], "expected": 0, "label": "zero m"},
-            {"input": [1, 1], "expected": 1, "label": "one cell"},
-            {"input": [1, 5], "expected": 1, "label": "one row"},
-            {"input": [2, 2], "expected": 2, "label": "2x2"},
-            {"input": [3, 3], "expected": 6, "label": "3x3"},
+            {"input": [m, n], "expected": _unique_paths_oracle(m, n), "label": label}
+            for label, m, n in dims
         ]
     if "kth_smallest" in text or "k-th smallest" in text or "kth smallest" in text:
+        cases = [
+            ("empty", [], 1),
+            ("k zero", [1, 2, 3], 0),
+            ("k negative", [1, 2, 3], -1),
+            ("first", [3, 1, 2], 1),
+            ("middle", [3, 1, 2], 2),
+            ("last", [3, 1, 2], 3),
+            ("duplicates count", [1, 1, 1], 2),
+            ("negative numbers", [-1, -5, 3, 0], 2),
+            ("reverse sorted", [5, 4, 3, 2, 1], 3),
+            ("k too large", [5], 2),
+        ]
         return [
-            {"input": [[], 1], "expected": None, "label": "empty"},
-            {"input": [[3, 1, 2], 1], "expected": 1, "label": "first"},
-            {"input": [[3, 1, 2], 3], "expected": 3, "label": "last"},
-            {"input": [[1, 1, 1], 2], "expected": 1, "label": "duplicates count"},
-            {"input": [[5], 2], "expected": None, "label": "k too large"},
+            {"input": [nums, k], "expected": _kth_smallest_oracle(nums, k), "label": label}
+            for label, nums, k in cases
         ]
     return []
+
+
+def _merge_intervals_oracle(intervals: list[list[int]]) -> list[list[int]]:
+    if not intervals:
+        return []
+    items = sorted([list(x) for x in intervals], key=lambda x: x[0])
+    merged = [items[0]]
+    for cur in items[1:]:
+        if cur[0] <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], cur[1])
+        else:
+            merged.append(cur)
+    return merged
+
+
+def _csv_oracle(line: str) -> list[str]:
+    return next(csv.reader([line]))
+
+
+def _unique_paths_oracle(m: int, n: int) -> int:
+    if m <= 0 or n <= 0:
+        return 0
+    return math.comb(m + n - 2, m - 1)
+
+
+def _kth_smallest_oracle(nums: list[int], k: int) -> Any:
+    if not nums or k < 1 or k > len(nums):
+        return None
+    return sorted(nums)[k - 1]
 
 
 def _dedupe_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -240,6 +314,12 @@ def run_sample(code: str, entry: str, sample: dict, timeout_sec: float = 1.0) ->
         return False, f"timeout on input {args!r}: {e}"
     except Exception as e:
         return False, f"runtime error on input {args!r}: {e!r}"
+    if "expected_any_index_value" in sample:
+        arr = args[0] if isinstance(args, list) and args else []
+        target = sample["expected_any_index_value"]
+        if not isinstance(got, int) or got < 0 or got >= len(arr) or arr[got] != target:
+            return False, f"expected any valid index for {target!r}, got {got!r}"
+        return True, ""
     if got != expected:
         return False, f"mismatch on {args!r}: got {got!r}, expected {expected!r}"
     return True, ""

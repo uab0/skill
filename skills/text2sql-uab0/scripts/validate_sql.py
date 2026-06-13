@@ -32,6 +32,10 @@ DISTINCT = re.compile(r"\bDISTINCT\b", re.IGNORECASE)
 JOIN = re.compile(r"\bJOIN\b", re.IGNORECASE)
 UNION_ALL = re.compile(r"\bUNION\s+ALL\b", re.IGNORECASE)
 UNION = re.compile(r"\bUNION\b", re.IGNORECASE)
+SELECT_STAR = re.compile(r"\bSELECT\s+(?:DISTINCT\s+)?\*", re.IGNORECASE)
+NOT_IN = re.compile(r"\bNOT\s+IN\s*\(", re.IGNORECASE)
+GROUP_BY = re.compile(r"\bGROUP\s+BY\b", re.IGNORECASE)
+AGGREGATE = re.compile(r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\(", re.IGNORECASE)
 
 
 WRITE_ACTIONS = {
@@ -86,24 +90,93 @@ def _authorizer(action: int, arg1: str | None, arg2: str | None,
     return sqlite3.SQLITE_OK
 
 
-def semantic_warnings(sql: str) -> list[str]:
+def _schema_summary(schema_ddl: str) -> dict[str, Any]:
+    tables: dict[str, list[str]] = {}
+    bridge_tables: set[str] = set()
+    for m in re.finditer(
+        r"CREATE\s+TABLE\s+([A-Za-z_][\w]*)\s*\((.*?)\)\s*;?",
+        schema_ddl,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        table = m.group(1)
+        body = m.group(2)
+        columns: list[str] = []
+        for part in body.split(","):
+            token = part.strip().split()
+            if not token:
+                continue
+            col = token[0].strip('"`[]')
+            if col.upper() in {"PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"}:
+                continue
+            columns.append(col)
+        tables[table.lower()] = columns
+        id_like = [c for c in columns if c.lower().endswith("id") or c.lower().endswith("_id")]
+        if len(id_like) >= 2 or re.search(r"PRIMARY\s+KEY\s*\([^)]*,[^)]*\)", body, re.IGNORECASE):
+            bridge_tables.add(table.lower())
+    return {"tables": tables, "bridge_tables": bridge_tables}
+
+
+def _select_list(sql: str) -> str:
+    m = re.search(r"\bSELECT\b\s+(.*?)\s+\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+    return m.group(1) if m else ""
+
+
+def semantic_warnings(sql: str, question: str = "", schema_ddl: str = "") -> list[str]:
     warnings: list[str] = []
     upper = sql.upper()
+    q = question.lower()
+    summary = _schema_summary(schema_ddl)
 
+    if SELECT_STAR.search(sql):
+        warnings.append("SELECT * risks extra columns or wrong column order under tuple-based grading.")
     if LEFT_JOIN.search(sql) and COUNT_STAR.search(sql):
         warnings.append("LEFT JOIN with COUNT(*) can miscount zero-child rows; consider COUNT(child_id).")
-    if LEFT_JOIN.search(sql) and re.search(r"\bWHERE\b", sql, re.IGNORECASE):
-        warnings.append("LEFT JOIN plus WHERE may filter away unmatched rows if WHERE references the right table.")
+    for alias in re.findall(
+        r"\bLEFT\s+(?:OUTER\s+)?JOIN\s+\w+(?:\s+(?:AS\s+)?(\w+))?",
+        sql,
+        re.IGNORECASE,
+    ):
+        if alias and re.search(r"\bWHERE\b.*\b" + re.escape(alias) + r"\.", sql, re.IGNORECASE | re.DOTALL):
+            if not re.search(r"\b" + re.escape(alias) + r"\.\w+\s+IS\s+NULL\b", sql, re.IGNORECASE):
+                warnings.append("LEFT JOIN right-table predicate in WHERE may turn the LEFT JOIN into an INNER JOIN.")
+                break
     if len(JOIN.findall(sql)) >= 2 and not DISTINCT.search(sql) and re.search(
         r"\b(name|title)\b", sql, re.IGNORECASE
     ):
         warnings.append("Multi-join entity listing without DISTINCT may produce duplicate rows.")
+    if summary["bridge_tables"] and not DISTINCT.search(sql) and not GROUP_BY.search(sql):
+        joined_bridge = [t for t in summary["bridge_tables"] if re.search(r"\b" + re.escape(t) + r"\b", sql, re.IGNORECASE)]
+        if joined_bridge and re.search(r"\b(name|title)\b", _select_list(sql), re.IGNORECASE):
+            warnings.append("Join through bridge table without DISTINCT/GROUP BY may duplicate listed entities.")
     if LIMIT.search(sql) and not ORDER_BY.search(sql):
         warnings.append("LIMIT without ORDER BY is nondeterministic unless the question permits any row.")
-    if LIMIT.search(sql) and re.search(r"\b(top|most|highest|lowest|max|min|tie|ties)\b", upper, re.IGNORECASE):
+    if LIMIT.search(sql) and re.search(r"\b(top|most|highest|lowest|max|min|tie|ties|tied)\b", f"{upper} {question}", re.IGNORECASE):
         warnings.append("LIMIT may mishandle ties; ensure the question does not require all tied rows.")
+    if re.search(r"\b(all tied|ties|tied)\b", q) and LIMIT.search(sql):
+        warnings.append("Question asks for all tied rows; LIMIT is likely wrong unless paired with tie-safe logic.")
+    if NOT_IN.search(sql) and re.search(r"\b(not|no|none|never|without)\b", q):
+        warnings.append("NOT IN can be unsafe when the subquery may contain NULL; consider NOT EXISTS.")
     if UNION.search(sql) and not UNION_ALL.search(sql):
-        warnings.append("UNION removes duplicates; ensure duplicate preservation is not required.")
+        if re.search(r"\b(duplicate|duplicates|occurrence|occurrences|including duplicates)\b", q):
+            warnings.append("UNION removes duplicates but the question may require duplicate preservation; consider UNION ALL.")
+        else:
+            warnings.append("UNION removes duplicates; ensure duplicate preservation is not required.")
+    if AGGREGATE.search(sql) and not GROUP_BY.search(sql):
+        select_list = _select_list(sql)
+        if re.search(r"\b(name|title|dept|category|city|country)\b", select_list, re.IGNORECASE):
+            warnings.append("Bare columns with aggregate and no GROUP BY are SQLite-specific and often semantically wrong.")
+    if question:
+        wanted = []
+        for key in ("name", "age", "title", "count", "average", "avg", "category", "revenue"):
+            if re.search(r"\b" + re.escape(key) + r"\b", q):
+                wanted.append(key)
+        select_lower = _select_list(sql).lower()
+        if len(wanted) >= 2:
+            first, second = wanted[0], wanted[1]
+            first_pos = select_lower.find("avg" if first == "average" else first)
+            second_pos = select_lower.find("avg" if second == "average" else second)
+            if first_pos >= 0 and second_pos >= 0 and second_pos < first_pos:
+                warnings.append("Projection order may not match the order requested in the question.")
     return warnings
 
 
@@ -113,6 +186,10 @@ def validate(schema_ddl: str, sql: str) -> tuple[bool, str]:
 
 
 def validate_with_warnings(schema_ddl: str, sql: str) -> tuple[bool, str, list[str]]:
+    return validate_with_warnings_for_question(schema_ddl, sql, "")
+
+
+def validate_with_warnings_for_question(schema_ddl: str, sql: str, question: str = "") -> tuple[bool, str, list[str]]:
     sql_stripped = _strip_trailing_semicolon(sql)
     if not sql_stripped:
         return False, "empty SQL", []
@@ -125,7 +202,7 @@ def validate_with_warnings(schema_ddl: str, sql: str) -> tuple[bool, str, list[s
     if not re.match(r"^\s*SELECT\b", sql_stripped, re.IGNORECASE):
         return False, "SQL must start with SELECT", []
 
-    warnings = semantic_warnings(sql_stripped)
+    warnings = semantic_warnings(sql_stripped, question=question, schema_ddl=schema_ddl)
     con = sqlite3.connect(":memory:")
     try:
         if schema_ddl:
@@ -157,7 +234,9 @@ def main(argv: list[str]) -> int:
             raise ValueError("payload must be an object")
     except (json.JSONDecodeError, ValueError) as e:
         return _emit(False, f"argv JSON invalid: {e}")
-    ok, err, warnings = validate_with_warnings(_payload_schema(payload), str(payload.get("sql", "")))
+    ok, err, warnings = validate_with_warnings_for_question(
+        _payload_schema(payload), str(payload.get("sql", "")), str(payload.get("question", ""))
+    )
     return _emit(ok, err, warnings)
 
 
