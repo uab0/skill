@@ -90,7 +90,7 @@ Open Track 是可驗證的統計分析 skill。輸入自然語言問題與 JSON 
 ## 4. 引用說明
 
 - Python standard library：`statistics`、`math.erf` 用於 Open Track 統計計算。
-- OpenAI ChatGPT / Codex：協助規格整理、程式修改、測試設計與文字草稿；所有提交檔案均經本地測試檢查。
+- ChatGPT：協助整理、程式修改與文字草稿。
 - 只參考概念、未複製 public code：LIDA / Data-Copilot / InfiAgent-DABench 等資料分析 agent 評測想法，主要借用「LLM 產生中間計畫，工具負責執行與驗證」的設計原則。
 
 ## 5. 最終自測摘要

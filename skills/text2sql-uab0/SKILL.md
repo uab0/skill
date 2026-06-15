@@ -19,9 +19,10 @@ Use when the input JSON contains `task_id`, `question`, `db_schema`, and optiona
 
 - **Run the dispatcher first.**
 - Only the result file at `AIASE_RESULT_PATH` is consumed. Chat text is ignored.
-- **Do not place the final SQL, prose, plain JSON, YAML, tables, or Markdown fenced JSON in chat.**
+- Do not create any other workspace files.
 - **Send every candidate SQL back to the dispatcher before stopping.**
 - Use reasoning only when the dispatcher result is missing, empty, or low confidence.
+- After the result file is written, reply only: `Done.`
 
 ## Procedure
 

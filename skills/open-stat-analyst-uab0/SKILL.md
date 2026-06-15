@@ -19,10 +19,11 @@ Use when the input JSON contains `task_id`, `question`, and `data`, where `data`
 
 - **Run the dispatcher first.**
 - Only the result file at `AIASE_RESULT_PATH` is consumed. Chat text is ignored.
+- Do not create any other workspace files.
 - **Do not compute final statistics in chat.**
-- **Do not place prose, plain JSON, YAML, tables, or Markdown fenced JSON as the final answer.**
 - **Send every candidate plan back to the dispatcher before stopping.**
 - Use reasoning only when the dispatcher asks for or permits a bounded candidate plan.
+- After the result file is written, reply only: `Done.`
 
 ## Procedure
 

@@ -18,11 +18,12 @@ Use when the input JSON contains `task_id`, `task_description`, and `code`, and 
 ## Output Contract
 
 - **Run the dispatcher first.**
-- Only the result file at `AIASE_RESULT_PATH` is consumed. Chat text is ignored.
 - **Do not review the code before the first dispatcher run.**
-- **Do not place prose, plain JSON, YAML, tables, or Markdown fenced JSON in chat as the final answer.**
+- Only the result file at `AIASE_RESULT_PATH` is consumed. Chat text is ignored.
+- Do not create any other workspace files.
 - **Send every candidate bug list back to the dispatcher before stopping.**
 - Use reasoning only when fallback is allowed by the dispatcher result.
+- After the result file is written, reply only: `Done.`
 
 ## Procedure
 
