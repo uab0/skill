@@ -35,6 +35,7 @@ def test_open_track_declares_current_skill_and_file_based_output():
     text = OPEN_TRACK.read_text(encoding="utf-8")
     assert "/open-stat-analyst-uab0" in text
     assert "skills/open-stat-analyst-uab0/" in text
+    assert "scripts/evaluate.py" in text
     assert "AIASE_RESULT_PATH" in text
     assert "deterministic evaluator" in text
     assert "Anti-hardcoding" in text

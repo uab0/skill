@@ -59,6 +59,17 @@ def main(argv: list[str]) -> int:
     if not isinstance(options, dict):
         options = {}
 
+    if plan.get("unsupported"):
+        return _emit({
+            "task_id": task_id,
+            "analysis_type": "unknown",
+            "columns": columns,
+            "result": {},
+            "decision": "invalid_input",
+            "warnings": warnings + [str(plan.get("unsupported_reason", "unsupported statistical method requested"))],
+            "confidence": min(confidence, 0.35),
+        })
+
     if analysis_type not in SUPPORTED:
         return _emit({
             "task_id": task_id,
@@ -190,6 +201,17 @@ def _infer_plan(question: str, data: list[dict]) -> dict:
     numeric = _numeric_columns(data)
     binary = _binary_columns(data)
     categorical = _categorical_columns(data)
+
+    unsupported = _unsupported_analysis_reason(q)
+    if unsupported:
+        return {
+            "analysis_type": "unknown",
+            "columns": {},
+            "options": {},
+            "unsupported": True,
+            "unsupported_reason": unsupported,
+            "_confidence": 0.30,
+        }
 
     two_prop_cue = _has_any(q, (
         "conversion", "converted", "success rate", "click-through rate", "click through rate",
@@ -446,6 +468,23 @@ def _extract_alpha(question: str) -> float:
 
 def _has_any(text: str, needles: tuple[str, ...]) -> bool:
     return any(n in text for n in needles)
+
+
+def _unsupported_analysis_reason(question: str) -> str:
+    unsupported = (
+        ("t-test", "t test", "ttest", "student's t", "student t"),
+        ("chi-square", "chi square", "chisquare", "χ²", "chi-squared"),
+        ("logistic regression", "logit"),
+        ("anova", "analysis of variance"),
+    )
+    for aliases in unsupported:
+        if _has_any(question, aliases):
+            return (
+                "unsupported statistical method requested: "
+                f"{aliases[0]}; supported methods are descriptive_stats, correlation, "
+                "linear_regression, two_proportion_z, and group_aggregate"
+            )
+    return ""
 
 
 def _tokens(text: str) -> list[str]:

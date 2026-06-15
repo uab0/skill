@@ -32,6 +32,7 @@ skills/open-stat-analyst-uab0/
 skills/open-stat-analyst-uab0/SKILL.md
 skills/open-stat-analyst-uab0/scripts/dispatch.py
 skills/open-stat-analyst-uab0/scripts/compute.py
+skills/open-stat-analyst-uab0/scripts/evaluate.py
 skills/open-stat-analyst-uab0/scripts/run.py
 ```
 
@@ -46,6 +47,14 @@ hermes chat --toolsets skills,terminal --yolo -Q -q '/open-stat-analyst-uab0 {"t
 ```
 
 skill 會把正式結果寫到 `AIASE_RESULT_PATH`；若未設定，寫到 `./aiase_result.json`。對話文字不作為正式輸出。`scripts/run.py` 同時支援 dispatcher 使用的 JSON payload，以及老師範本形式的 argparse flags，避免直接呼叫 `run.py` 時因介面不一致而失敗。
+
+自動化比對方式：
+
+```bash
+python3 skills/open-stat-analyst-uab0/scripts/evaluate.py --input scenario.json --result result.json
+```
+
+`evaluate.py` 會讀入同一份 scenario 與 skill 產生的 result file，依 result 中的 `analysis_type` 與 `columns` 回到輸入資料重算 ground truth；也可用 `--expected expected.json` 加上子集合式預期檢查。
 
 輸入 JSON schema：
 
@@ -257,9 +266,28 @@ Scenario 8：模糊 group summary + candidate plan
 
 預期：LLM 只補計畫，scripts 驗證欄位並計算各 segment 的 count/mean。
 
+Scenario 9：不支援的統計方法，不可假裝計算
+
+```json
+{
+  "task_id": "open_stat_unsupported_ttest_001",
+  "question": "Run a two-sample t-test comparing score between group A and group B. Return the p-value.",
+  "data": [
+    {"group": "A", "score": 10.0},
+    {"group": "A", "score": 12.0},
+    {"group": "A", "score": 11.0},
+    {"group": "B", "score": 18.0},
+    {"group": "B", "score": 17.0},
+    {"group": "B", "score": 19.0}
+  ]
+}
+```
+
+預期：`analysis_type = "unknown"`，`decision = "invalid_input"`，`result = {}`，`warnings` 說明 t-test 不在支援範圍內。skill 不應改用描述統計或 group aggregate 來假裝回答 p-value。
+
 ### Metric
 
-每題以 deterministic evaluator 評分：
+每題以 `skills/open-stat-analyst-uab0/scripts/evaluate.py` 這個 deterministic evaluator 評分：
 
 1. result file 存在且是合法 JSON object。
 2. `task_id` 完全一致。
@@ -268,6 +296,7 @@ Scenario 8：模糊 group summary + candidate plan
 5. 數值欄位以 absolute tolerance `1e-6` 比對；group aggregate 依 group key 排序後比對。
 6. `decision` 可由結果重算：例如 `p_value < alpha` 為 `significant`，否則 `not_significant`。
 7. 遺失值情境須在 `warnings` 說明 selected-column rows 被丟棄。
+8. 不支援方法情境須回 `invalid_input` 或等價拒絕狀態，且不可輸出偽造的數值結果。
 
 ### Anti-hardcoding 與 staff perturbation
 
@@ -320,3 +349,4 @@ Scenario 8：模糊 group summary + candidate plan
 | Correlation candidate fallback | 420 | 180 | 600 |
 | Regression candidate fallback | 430 | 190 | 620 |
 | Group candidate fallback | 430 | 210 | 640 |
+| Unsupported t-test rejection | 380 | 120 | 500 |

@@ -329,6 +329,26 @@ def test_dispatch_candidate_plan_for_ambiguous_group_aggregate():
     assert out["result"]["groups"]["returning"] == {"count": 2, "mean": 25.0}
 
 
+def test_dispatch_rejects_unsupported_t_test_without_fake_result():
+    out = _run_dispatch({
+        "task_id": "open_stat_unsupported_ttest_001",
+        "question": "Run a two-sample t-test comparing score between group A and group B. Return the p-value.",
+        "data": [
+            {"group": "A", "score": 10.0},
+            {"group": "A", "score": 12.0},
+            {"group": "A", "score": 11.0},
+            {"group": "B", "score": 18.0},
+            {"group": "B", "score": 17.0},
+            {"group": "B", "score": 19.0},
+        ],
+    })
+    assert out["analysis_type"] == "unknown"
+    assert out["decision"] == "invalid_input"
+    assert out["result"] == {}
+    assert "unsupported statistical method" in " ".join(out["warnings"])
+    assert "t-test" in " ".join(out["warnings"])
+
+
 def test_dispatch_invalid_candidate_plan_still_returns_contract():
     out = _run_dispatch({
         "task_id": "open_stat_invalid_plan",
