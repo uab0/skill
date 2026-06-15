@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""
-bug-hunter skill — final output wrapper.
-
-Reads JSON from argv[1] with {task_id, verdict, bugs, confidence};
-enforces shape and the rule "verdict=clean → bugs=[]"; emits a single fenced JSON block.
-"""
+"""bug-hunter skill — file-based final output wrapper."""
 
 from __future__ import annotations
 
 import json
+import os
 import sys
+import argparse
 
 
 ALLOWED_VERDICTS = {"buggy", "clean"}
@@ -18,6 +15,10 @@ ALLOWED_TYPES = {
     "edge_case", "api_misuse", "inefficient", "unhandled_input",
 }
 ALLOWED_SEVERITIES = {"critical", "high", "medium", "low"}
+
+
+def resolve_result_path() -> str:
+    return os.environ.get("AIASE_RESULT_PATH") or os.path.join(os.getcwd(), "aiase_result.json")
 
 
 def _clamp_confidence(v) -> float:
@@ -76,15 +77,25 @@ def emit_contract(obj: dict) -> int:
         "bugs": bugs,
         "confidence": _clamp_confidence(obj.get("confidence", 0.5)),
     }
-    sys.stdout.write("```json\n")
-    sys.stdout.write(json.dumps(out, ensure_ascii=False, indent=2))
-    sys.stdout.write("\n```\n")
+    path = resolve_result_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False)
+    os.replace(tmp, path)
+    print(f"written ok -> {path}")
     return 0
 
 
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         return emit_contract({"task_id": "", "verdict": "clean", "bugs": [], "confidence": 0.0})
+    if argv[1].startswith("--"):
+        try:
+            payload = _parse_flag_payload(argv[1:])
+        except (SystemExit, ValueError):
+            return emit_contract({"task_id": "", "verdict": "clean", "bugs": [], "confidence": 0.0})
+        return emit_contract(payload)
     try:
         payload = json.loads(argv[1])
         if not isinstance(payload, dict):
@@ -92,6 +103,27 @@ def main(argv: list[str]) -> int:
     except (json.JSONDecodeError, ValueError):
         return emit_contract({"task_id": "", "verdict": "clean", "bugs": [], "confidence": 0.0})
     return emit_contract(payload)
+
+
+def _parse_flag_payload(args: list[str]) -> dict:
+    parser = argparse.ArgumentParser(description="Write Bug Hunter result JSON.")
+    parser.add_argument("--task_id", required=True)
+    parser.add_argument("--verdict", required=True)
+    parser.add_argument("--confidence", default=0.5)
+    parser.add_argument("--bugs", default="[]")
+    ns = parser.parse_args(args)
+    try:
+        bugs = json.loads(ns.bugs)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"invalid --bugs JSON: {e}") from e
+    if not isinstance(bugs, list):
+        raise ValueError("--bugs must be a JSON array")
+    return {
+        "task_id": ns.task_id,
+        "verdict": ns.verdict,
+        "bugs": bugs,
+        "confidence": ns.confidence,
+    }
 
 
 if __name__ == "__main__":

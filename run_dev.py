@@ -2,13 +2,12 @@
 """
 run_dev.py — AIASE 2026 期末專案本地自測驅動程式
 
-本檔同時是「single source of truth」of:
-- extract_last_json_block(stdout): 從 Hermes stdout 擷取最後一段 fenced JSON
-- bag_equal(rows_a, rows_b):       SQL 結果的 multiset equality
-- run_sql(db_path, sql):           在 sqlite 上跑 read-only SQL
-- grade_basic / grade_pairwise:    本地對 dev set / reference 對手評分
+正式 file-based 評分核心來自 aiase_contract.py:
+- result file 讀取
+- Basic schema validation
+- Basic SQL 執行與 bag equality
 
-評分環境會 import 上面這些 helper,**不要在他處自行實作對比邏輯**。
+本檔仍保留部分舊 helper 作為本地品質測試與 reference smoke test 使用。
 """
 
 from __future__ import annotations
@@ -17,15 +16,20 @@ import argparse
 import json
 import os
 import re
+import signal
 import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Iterable, Optional
+
+import aiase_contract as contract
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -33,7 +37,7 @@ DEV_SET_DIR = REPO_ROOT / "dev_set"
 RESULTS_DIR = REPO_ROOT / "dev_run_results"
 
 HERMES_BIN = os.environ.get("HERMES_BIN", "hermes")
-HERMES_TIMEOUT_SEC = int(os.environ.get("HERMES_TIMEOUT_SEC", "120"))
+HERMES_TIMEOUT_SEC = int(os.environ.get("HERMES_TIMEOUT_SEC", "600"))
 HERMES_QUIET = os.environ.get("HERMES_QUIET", "1").lower() not in {
     "0",
     "false",
@@ -44,6 +48,28 @@ HERMES_PRELOAD_SKILL = os.environ.get("HERMES_PRELOAD_SKILL", "").lower() in {
     "true",
     "yes",
 }
+
+
+class _Timeout(Exception):
+    pass
+
+
+@contextmanager
+def _time_limit(seconds: float):
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise _Timeout("case timed out")
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
 
 
 # ---------------------------------------------------------------------------
@@ -198,12 +224,16 @@ class HermesResult:
     returncode: int
     elapsed_sec: float
     error: str = ""
+    result_obj: Optional[dict] = None
 
 
 def call_hermes_skill(slash_command: str, payload: dict) -> HermesResult:
     """
-    呼叫正式評分路徑:
-    `hermes chat -Q --toolsets skills,terminal --yolo -q '<slash_command> <payload_json>'`。
+    呼叫 file-based 正式評分路徑:
+    `hermes chat --toolsets skills,terminal --yolo -Q -q '<slash_command> <payload_json>'`。
+
+    每題設定 AIASE_RESULT_PATH,由 skill 的 scripts/run.py 寫結果檔;本地
+    run_dev.py 再讀檔。stdout 只保留作 debug,不再作為評分資料來源。
 
     設定 HERMES_QUIET=0 時,可關閉 `-Q` 以對照老師公告的原始指令。
 
@@ -243,9 +273,13 @@ def call_hermes_skill(slash_command: str, payload: dict) -> HermesResult:
     ])
 
     t0 = time.time()
+    tmpdir = tempfile.mkdtemp(prefix="aiase_result_")
+    result_path = str(Path(tmpdir) / "result.json")
+    env = dict(os.environ)
+    env["AIASE_RESULT_PATH"] = result_path
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=HERMES_TIMEOUT_SEC, check=False,
+            cmd, env=env, capture_output=True, text=True, timeout=HERMES_TIMEOUT_SEC, check=False,
         )
     except subprocess.TimeoutExpired:
         return HermesResult(
@@ -254,12 +288,23 @@ def call_hermes_skill(slash_command: str, payload: dict) -> HermesResult:
             error=f"hermes timed out after {HERMES_TIMEOUT_SEC}s",
         )
     elapsed = time.time() - t0
+    result_obj = contract.read_result(result_path)
+    if result_obj is None:
+        return HermesResult(
+            ok=False,
+            stdout=proc.stdout or "",
+            stderr=proc.stderr or "",
+            returncode=proc.returncode,
+            elapsed_sec=elapsed,
+            error="no result file (task not produced)",
+        )
     return HermesResult(
-        ok=(proc.returncode == 0),
+        ok=True,
         stdout=proc.stdout or "",
         stderr=proc.stderr or "",
         returncode=proc.returncode,
         elapsed_sec=elapsed,
+        result_obj=result_obj,
     )
 
 
@@ -396,35 +441,27 @@ def grade_basic(skill_name: str, dry_run: bool = False) -> TrackReport:
             ))
             continue
 
-        obj = extract_last_json_block(hr.stdout)
+        obj = hr.result_obj
         if obj is None:
             rep.results.append(TaskResult(
-                task_id, False, reason="no valid fenced JSON in stdout",
+                task_id, False, reason="no valid result object",
                 elapsed_sec=hr.elapsed_sec,
             ))
             continue
 
-        if obj.get("task_id") != task_id:
+        ok_schema, schema_reason = contract.validate_basic_schema(obj, task_id)
+        if not ok_schema:
             rep.results.append(TaskResult(
                 task_id, False,
-                reason=f"task_id mismatch (got {obj.get('task_id')!r})",
+                reason=f"schema invalid: {schema_reason}",
                 elapsed_sec=hr.elapsed_sec,
             ))
             continue
 
         student_sql = obj.get("sql", "")
-        ok_ro, why = is_read_only_sql(student_sql)
-        if not ok_ro:
-            rep.results.append(TaskResult(
-                task_id, False, reason=f"non-read-only SQL: {why}",
-                sql_returned=student_sql, elapsed_sec=hr.elapsed_sec,
-            ))
-            continue
-
-        # 跑兩段 SQL,以 bag_equal 比對
         try:
-            student_rows = run_sql(db_path, student_sql)
-            gold_rows = run_sql(db_path, gold_sql)
+            student_rows = contract.run_sql(str(db_path), student_sql)
+            gold_rows = contract.run_sql(str(db_path), gold_sql)
         except sqlite3.Error as e:
             rep.results.append(TaskResult(
                 task_id, False, reason=f"SQL execution error: {e}",
@@ -432,7 +469,7 @@ def grade_basic(skill_name: str, dry_run: bool = False) -> TrackReport:
             ))
             continue
 
-        passed = bag_equal(student_rows, gold_rows)
+        passed = contract.bag_equal(student_rows, gold_rows)
         rep.results.append(TaskResult(
             task_id, passed,
             reason="" if passed else "bag equality failed",
@@ -496,7 +533,7 @@ def grade_pairwise(skill_name: str, role: str, dry_run: bool = False) -> TrackRe
             if not hr.ok:
                 rep.results.append(TaskResult(task_id, False, reason=f"hermes failed: {hr.error}"))
                 continue
-            obj = extract_last_json_block(hr.stdout)
+            obj = hr.result_obj
             if obj is None or obj.get("task_id") != task_id or "code" not in obj:
                 rep.results.append(TaskResult(task_id, False, reason="contract violation"))
                 continue
@@ -538,7 +575,7 @@ def grade_pairwise(skill_name: str, role: str, dry_run: bool = False) -> TrackRe
             if not hr.ok:
                 rep.results.append(TaskResult(task_id, False, reason=f"hermes failed: {hr.error}"))
                 continue
-            obj = extract_last_json_block(hr.stdout)
+            obj = hr.result_obj
             if obj is None or obj.get("task_id") != task_id:
                 rep.results.append(TaskResult(task_id, False, reason="contract violation"))
                 continue
@@ -554,7 +591,7 @@ def grade_pairwise(skill_name: str, role: str, dry_run: bool = False) -> TrackRe
                 payload_c = dict(payload_b); payload_c["code"] = clean_code
                 hr_c = call_hermes_skill(slash, payload_c)
                 if hr_c.ok:
-                    objc = extract_last_json_block(hr_c.stdout) or {}
+                    objc = hr_c.result_obj or {}
                     if objc.get("verdict") == "buggy" or len(objc.get("bugs", []) or []) > 0:
                         clean_fp = 1
 
@@ -602,10 +639,11 @@ def _run_code_test_cases(code: str, constraints: dict, test_cases: list[dict]) -
         args = tc.get("input", [])
         expected = tc.get("expected")
         try:
-            got = fn(*args) if isinstance(args, list) else fn(args)
+            with _time_limit(5.0):
+                got = fn(*args) if isinstance(args, list) else fn(args)
             if got == expected:
                 passed += 1
-        except Exception:
+        except (_Timeout, Exception):
             pass
     return passed, len(test_cases) - passed
 

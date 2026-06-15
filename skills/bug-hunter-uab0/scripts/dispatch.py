@@ -54,56 +54,103 @@ def _line_text(code: str, line: int) -> str:
     return ""
 
 
-def _family_static_bugs(entry: str, code: str, task_description: str) -> list[dict]:
+def _has_bad_probe(probes: list[dict], outcomes: set[str] | None = None) -> bool:
+    outcomes = outcomes or {"crash", "mismatch", "timeout"}
+    return any(probe.get("outcome") in outcomes for probe in probes)
+
+
+def _has_probe_text(probes: list[dict], *needles: str) -> bool:
+    lowered = [
+        f"{probe.get('label', '')} {probe.get('error', '')}".lower()
+        for probe in probes
+        if probe.get("outcome") in {"crash", "mismatch", "timeout"}
+    ]
+    return any(any(needle in text for needle in needles) for text in lowered)
+
+
+def _family_static_bugs(entry: str, code: str, task_description: str, probes: list[dict]) -> list[dict]:
     text = f"{entry} {task_description}".lower()
     bugs: list[dict] = []
     compact = " ".join(code.split())
 
+    if "merge_intervals" in text or "interval" in text:
+        touching_required = "touch" in text
+        if touching_required and _has_bad_probe(probes, {"mismatch"}):
+            for i, line_text in enumerate(code.splitlines(), 1):
+                normalized = line_text.replace(" ", "")
+                if "cur[0]<merged[-1][1]" in normalized:
+                    bugs.append({
+                        "line_start": i,
+                        "line_end": i,
+                        "severity": "medium",
+                        "type": "off_by_one",
+                        "description": "Touching-interval probes fail because the merge condition uses strict `<`.",
+                        "suggested_fix": "Use `<=` so intervals such as [1, 2] and [2, 3] merge.",
+                    })
+                    break
+
     if "binary_search" in text or "binary search" in text:
         line = _find_line(code, "while lo < hi")
-        if line > 0 and "while lo < hi" in code:
+        uses_inclusive_hi = "len(arr) - 1" in code or "len(arr)-1" in code
+        if line > 0 and "while lo < hi" in code and uses_inclusive_hi and _has_bad_probe(probes, {"mismatch"}):
             bugs.append({
                 "line_start": line,
                 "line_end": line,
                 "severity": "high",
                 "type": "off_by_one",
-                "description": "`while lo < hi` can skip the final candidate in inclusive-bound binary search.",
+                "description": "Probe failures show this inclusive-bound binary search skips a final candidate.",
                 "suggested_fix": "Use `while lo <= hi` with `hi = len(arr) - 1`, or use a consistent exclusive-bound variant.",
+            })
+        uses_exclusive_hi = "len(arr)" in code and not uses_inclusive_hi
+        if uses_exclusive_hi and "while lo < hi" in code and "hi = mid - 1" in code and _has_bad_probe(probes, {"mismatch"}):
+            ret_line = _find_line(code, "hi = mid - 1")
+            bugs.append({
+                "line_start": ret_line,
+                "line_end": ret_line,
+                "severity": "high",
+                "type": "logic_error",
+                "description": "Search probes fail because exclusive upper bounds are mixed with inclusive shrinkage.",
+                "suggested_fix": "With `hi = len(arr)`, update the upper bound with `hi = mid`, or switch the whole loop to an inclusive-bound convention.",
             })
 
     if "parse_csv_line" in text or "csv" in text:
         has_quote_state = "in_quotes" in code or "quote" in code.lower()
-        if "if c == ','" in code and not has_quote_state:
+        quote_probe_failed = _has_probe_text(probes, "quoted", "quote", '"""', "b,c")
+        escaped_quote_required = "escaped" in text or '""' in task_description
+        escaped_quote_failed = escaped_quote_required and _has_bad_probe(probes, {"mismatch"})
+        if "if c == ','" in code and not has_quote_state and quote_probe_failed:
             line = _find_line(code, "if c == ','")
             bugs.append({
                 "line_start": line,
                 "line_end": max(line, _find_line(code, "cur +=")),
                 "severity": "high",
                 "type": "unhandled_input",
-                "description": "Parser splits every comma and does not handle quoted fields containing commas.",
+                "description": "Quoted-field probes fail because the parser splits commas without quote state.",
                 "suggested_fix": "Track quoted state and only split on commas outside quotes; handle doubled quotes inside quoted fields.",
             })
-        elif "in_quotes = not in_quotes" in code and '""' not in code:
-            line = _find_line(code, "in_quotes = not in_quotes")
+        elif "in_quotes = not in_quotes" in code and '""' not in code and (quote_probe_failed or escaped_quote_failed):
+            line = _find_quote_condition_line(code) or _find_line(code, "in_quotes = not in_quotes")
             bugs.append({
                 "line_start": line,
                 "line_end": line,
                 "severity": "medium",
                 "type": "edge_case",
-                "description": "Toggling quote state on every quote does not implement doubled-quote escaping.",
+                "description": "Escaped-quote probes fail because quote state toggles on every quote.",
                 "suggested_fix": "When inside quotes, treat `\"\"` as one literal quote and only close on a lone quote.",
             })
 
     if "unique_paths" in text or "grid" in text:
         has_zero_guard = ("m <= 0" in code or "m<=0" in code) and ("n <= 0" in code or "n<=0" in code)
-        if not has_zero_guard:
+        non_positive_required = "m <= 0" in text or "n <= 0" in text or "non-positive" in text
+        non_positive_failed = _has_probe_text(probes, "zero dimension") or _has_bad_probe(probes, {"crash"})
+        if not has_zero_guard and non_positive_required and non_positive_failed:
             guard_line = _find_line(code, "dp =") or 1
             bugs.append({
                 "line_start": guard_line,
                 "line_end": guard_line,
                 "severity": "medium",
                 "type": "edge_case",
-                "description": "No guard for non-positive dimensions; m <= 0 or n <= 0 should return 0 before building/indexing dp.",
+                "description": "Non-positive dimension probes fail because the code builds/indexes the DP table without a guard.",
                 "suggested_fix": "Add `if m <= 0 or n <= 0: return 0` before creating the DP table.",
             })
         recurrence_line = 0
@@ -112,47 +159,61 @@ def _family_static_bugs(entry: str, code: str, task_description: str) -> list[di
             if "dp[i][j]=dp[i-1][j]+dp[i][j]" in normalized:
                 recurrence_line = i
                 break
-        if recurrence_line:
+        if recurrence_line and _has_bad_probe(probes, {"mismatch"}):
             bugs.append({
                 "line_start": recurrence_line,
                 "line_end": recurrence_line,
                 "severity": "high",
                 "type": "logic_error",
-                "description": "DP recurrence reads the cell being assigned instead of the left neighbor.",
+                "description": "Path-count probes fail because the DP recurrence reads the cell being assigned instead of the left neighbor.",
                 "suggested_fix": "Change the recurrence to `dp[i][j] = dp[i-1][j] + dp[i][j-1]`.",
+            })
+        padded = ("n+1" in code or "n + 1" in code) and ("m+1" in code or "m + 1" in code)
+        if padded and "return dp[m][n]" in code and _has_bad_probe(probes, {"mismatch"}):
+            line = _find_line(code, "return dp[m][n]")
+            bugs.append({
+                "line_start": line,
+                "line_end": line,
+                "severity": "medium",
+                "type": "off_by_one",
+                "description": "Path-count probes fail because the padded DP table is initialized/indexed inconsistently.",
+                "suggested_fix": "Use an unpadded m x n table, or initialize the padded table so dp[1][1] is exactly 1.",
             })
 
     if "kth_smallest" in text or "k-th smallest" in text or "kth smallest" in text:
-        if "[k]" in code:
+        if "[k]" in code and _has_bad_probe(probes, {"crash", "mismatch"}):
             line = _find_line(code, "[k]")
             bugs.append({
                 "line_start": line,
                 "line_end": line,
                 "severity": "high",
                 "type": "off_by_one",
-                "description": "Uses k as a zero-based index even though the task defines 1-based k.",
+                "description": "Probe failures show k is used as a zero-based index even though the task defines 1-based k.",
                 "suggested_fix": "Use `sorted(nums)[k - 1]` after validating k.",
             })
         has_lower = "k < 1" in compact or "k<1" in compact
         has_upper = "k > len(nums)" in compact or "k>len(nums)" in compact
-        if not (has_lower and has_upper):
+        bounds_required = "k < 1" in text or "k > len" in text or "empty" in text
+        bounds_failed = _has_bad_probe(probes, {"crash"}) or _has_probe_text(probes, "empty", "indexerror")
+        if not (has_lower and has_upper) and bounds_required and bounds_failed:
             guard_line = _find_line(code, "if not nums") or 1
             bugs.append({
                 "line_start": guard_line,
                 "line_end": guard_line,
                 "severity": "medium",
                 "type": "unhandled_input",
-                "description": "k bounds are not fully validated; k < 1 or k > len(nums) should return None.",
+                "description": "Invalid-k probes fail because k bounds are not fully validated.",
                 "suggested_fix": "Guard with `if not nums or k < 1 or k > len(nums): return None`.",
             })
-        if "set(nums)" in code:
+        duplicates_required = "duplicate" in text
+        if "set(nums)" in code and duplicates_required and _has_bad_probe(probes, {"mismatch"}):
             line = _find_line(code, "set(nums)")
             bugs.append({
                 "line_start": line,
                 "line_end": line,
                 "severity": "medium",
                 "type": "logic_error",
-                "description": "`set(nums)` removes duplicates even though duplicates must count for k-th smallest.",
+                "description": "Duplicate-count probes fail because `set(nums)` removes duplicates.",
                 "suggested_fix": "Sort the original list, not a set of it.",
             })
 
@@ -176,6 +237,16 @@ def _find_line(code: str, needle: str) -> int:
         if needle in line:
             return i
     return 1
+
+
+def _find_quote_condition_line(code: str) -> int:
+    for i, line in enumerate(code.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("if ") and "c ==" in stripped and "'\"'" in stripped:
+            return i
+        if stripped.startswith("if ") and "c ==" in stripped and '"\\""' in stripped:
+            return i
+    return 0
 
 
 def _candidate_bugs_from_payload(payload: dict, code: str) -> list[dict]:
@@ -249,6 +320,16 @@ def _classify_probe(entry: str, code: str, probe: dict) -> dict | None:
         return None
     if "binary_search" in text:
         line = _find_line(code, "while lo < hi")
+        if "while lo < hi" not in code:
+            line = max(_return_lines(code)[-1] if _return_lines(code) else 1, 1)
+            return {
+                "line_start": line,
+                "line_end": line,
+                "severity": "high",
+                "type": "logic_error",
+                "description": f"Probe '{probe.get('label', 'case')}' returns the wrong search result: {error}",
+                "suggested_fix": "Revise the search boundary logic so all present targets return a valid index and absent targets return -1.",
+            }
         return {
             "line_start": line,
             "line_end": line,
@@ -259,6 +340,16 @@ def _classify_probe(entry: str, code: str, probe: dict) -> dict | None:
         }
     if "csv" in text or "parse_csv_line" in text:
         line = _find_line(code, "if c == ','")
+        if "if c == ','" not in code and 'elif c == ","' not in code:
+            line = max(_return_lines(code)[-1] if _return_lines(code) else 1, 1)
+            return {
+                "line_start": line,
+                "line_end": line,
+                "severity": "high",
+                "type": "logic_error",
+                "description": f"Probe '{probe.get('label', 'case')}' returns the wrong CSV parse: {error}",
+                "suggested_fix": "Revise the parser to satisfy quoted fields, escaped quotes, empty fields, and comma separation.",
+            }
         return {
             "line_start": line,
             "line_end": line,
@@ -278,14 +369,24 @@ def _classify_probe(entry: str, code: str, probe: dict) -> dict | None:
                 "description": "Uses k as a zero-based index even though the task defines 1-based k.",
                 "suggested_fix": "Validate k, then return `sorted(nums)[k - 1]`.",
             }
-        line = _find_line(code, "set(")
+        if "set(" in code and ("duplicate" in text or "duplicates" in text):
+            line = _find_line(code, "set(")
+            return {
+                "line_start": line,
+                "line_end": line,
+                "severity": "medium",
+                "type": "logic_error",
+                "description": "The failing probe shows duplicates are not handled according to the spec.",
+                "suggested_fix": "Do not deduplicate; sort the original list so duplicates count.",
+            }
+        line = max(_return_lines(code)[-1] if _return_lines(code) else 1, 1)
         return {
             "line_start": line,
             "line_end": line,
-            "severity": "medium",
+            "severity": "high",
             "type": "logic_error",
-            "description": "The failing probe shows duplicates are not handled according to the spec.",
-            "suggested_fix": "Do not deduplicate; sort the original list so duplicates count.",
+            "description": f"Probe '{probe.get('label', 'case')}' returns the wrong k-th element: {error}",
+            "suggested_fix": "Revise sorting, duplicate handling, and k validation to match the specification.",
         }
     line = bad_line if bad_line > 0 else max(_return_lines(code)[-1] if _return_lines(code) else 1, 1)
     return {
@@ -341,7 +442,7 @@ def _deterministic_bugs(payload: dict, code: str, entry: str, task: dict | None)
             "description": str(finding.get("message", "Structural issue found.")),
             "suggested_fix": "Remove the unsafe construct or define the required entry function.",
         })
-    static_bugs = _family_static_bugs(entry, code, task_description)
+    static_bugs = _family_static_bugs(entry, code, task_description, probes)
     bugs: list[dict] = structural_bugs + static_bugs
 
     # If a known-family static rule already localized the root cause, do not

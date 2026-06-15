@@ -1,42 +1,30 @@
 ---
 name: hello-aiase
-description: Minimal smoke-test skill — echoes a greeting in the AIASE 2026 output contract. Use to verify the Hermes ↔ LiteLLM ↔ skill pipeline is wired up correctly.
-version: 1.0.0
+description: Minimal warm-up skill. Reads a name from the input JSON and writes a greeting result file (file-based output contract).
+version: 2.0.0
 metadata:
   hermes:
-    tags: [smoke-test, aiase-2026]
-    category: utility
+    tags: [hello, aiase, warmup]
+    category: aiase
+    requires_toolsets: [terminal]
 ---
 
-# Hello AIASE — Smoke Test
+# hello-aiase (file-based output contract)
+
+最小範例：示範「skill 由 `scripts/run.py` 把結果寫到結果檔」的輸出契約。
 
 ## When to Use
-
-When the user invokes `/hello-aiase` with a JSON payload like `{"name":"world"}`. Use this skill to confirm Hermes can:
-
-1. discover and load this skill,
-2. invoke the script under `scripts/`,
-3. relay the resulting fenced JSON block as the final output.
-
-This skill performs **no LLM reasoning** — it just echoes structured input. If `/hello-aiase` works end-to-end, the rest of your AIASE 2026 setup is wired correctly.
+當使用者輸入 `/hello-aiase {json}` 時觸發。輸入形如 `{"task_id":"...","name":"Ada"}`。
 
 ## Procedure
-
-1. Take the entire JSON payload from the user message verbatim (it should be an object; if missing, default to `{}`).
-2. Invoke `scripts/run.py` with the JSON payload as a single argv string, e.g.:
-
+1. 從輸入 JSON 取得 `task_id` 與 `name`。
+2. **使用 `terminal` 工具（不要用 process/background 工具）**，以**絕對路徑**執行
+   （`<skill_dir>` 由 Hermes 以 `[Skill directory: ...]` 提供）：
    ```
-   python scripts/run.py '{"name":"world"}'
+   python3 <skill_dir>/scripts/run.py --task_id "<task_id>" --name "<name>"
    ```
-
-3. The script will print a single fenced JSON block to stdout. **Emit that fenced JSON block as your final response, unchanged.** Do not add any reasoning text after it.
-
-## Pitfalls
-
-- Do not paraphrase the script output. The grader extracts the **last** fenced ```json``` block from stdout; anything after it that looks like JSON would be picked up instead.
-- Do not call the LLM to "improve" the greeting — this skill is intentionally deterministic.
+3. 執行 `scripts/run.py` 把最終結果寫入結果檔（路徑取自環境變數 `AIASE_RESULT_PATH`，
+   未設定則寫工作目錄 `./aiase_result.json`）。**你不需要在對話訊息中再輸出或複述 JSON。**
 
 ## Verification
-
-- The final output must be a single fenced ```json``` block whose top-level is an object with fields `ok=true`, `skill="hello-aiase"`, and `echo=<the input>`.
-- If input contains `task_id`, the output `task_id` must equal the input `task_id`.
+結果檔存在、為合法 JSON object、含 `task_id` / `greeting` / `ok`。

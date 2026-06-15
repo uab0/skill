@@ -1,36 +1,31 @@
 #!/usr/bin/env python3
-"""hello-aiase smoke-test entry point — deterministic, no LLM, no network."""
+"""hello-aiase / scripts/run.py — file-based 輸出契約入口（原子寫入結果檔）。
 
-from __future__ import annotations
+⚠️ 刻意「自帶」resolve_result_path，不 import aiase_contract：
+skill 被單獨安裝到 ~/.hermes/skills/<cat>/<name>/ 後找不到 repo 根的模組。
+路徑規則須與 aiase_contract.resolve_result_path 完全一致。
+"""
+import os, json, argparse
 
-import json
-import sys
+
+def resolve_result_path() -> str:
+    return os.environ.get("AIASE_RESULT_PATH") or os.path.join(os.getcwd(), "aiase_result.json")
 
 
-def main(argv: list[str]) -> int:
-    raw = argv[1] if len(argv) > 1 else "{}"
-    try:
-        payload = json.loads(raw)
-        if not isinstance(payload, dict):
-            payload = {"_warning": "input was not a JSON object", "_raw": raw}
-    except json.JSONDecodeError as e:
-        payload = {"_warning": f"invalid JSON: {e}", "_raw": raw}
-
-    out: dict = {
-        "ok": True,
-        "skill": "hello-aiase",
-        "echo": payload,
-        "greeting": f"hello, {payload.get('name', 'AIASE 2026')}!",
-    }
-    if "task_id" in payload:
-        out["task_id"] = payload["task_id"]
-
-    # 輸出契約:單一 fenced JSON 區塊。
-    sys.stdout.write("```json\n")
-    sys.stdout.write(json.dumps(out, ensure_ascii=False, indent=2))
-    sys.stdout.write("\n```\n")
-    return 0
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--task_id", required=True)
+    ap.add_argument("--name", default="world")
+    a = ap.parse_args()
+    result = {"task_id": a.task_id, "greeting": f"Hello, {a.name}!", "ok": True}
+    path = resolve_result_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False)
+    os.replace(tmp, path)  # 原子寫入
+    print(f"written ok -> {path}")
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    main()

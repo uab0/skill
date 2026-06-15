@@ -1,11 +1,13 @@
 """Regression tests for bug-hunter-uab0 deterministic dispatch."""
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-from run_dev import extract_last_json_block
+import aiase_contract as contract
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,17 +16,22 @@ DISPATCH = ROOT / "skills" / "bug-hunter-uab0" / "scripts" / "dispatch.py"
 
 
 def _run_dispatch(payload: dict) -> dict:
-    proc = subprocess.run(
-        [sys.executable, str(DISPATCH), json.dumps(payload, ensure_ascii=False)],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stderr
-    obj = extract_last_json_block(proc.stdout)
-    assert obj is not None, proc.stdout
-    return obj
+    with tempfile.TemporaryDirectory(prefix="aiase_test_") as tmpdir:
+        result_path = Path(tmpdir) / "result.json"
+        env = dict(os.environ)
+        env["AIASE_RESULT_PATH"] = str(result_path)
+        proc = subprocess.run(
+            [sys.executable, str(DISPATCH), json.dumps(payload, ensure_ascii=False)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        obj = contract.read_result(str(result_path))
+        assert obj is not None, proc.stdout
+        return obj
 
 
 def _load(task_id: str) -> dict:
@@ -65,6 +72,24 @@ def test_dispatch_clean_on_reference_clean_code():
         assert out["bugs"] == []
 
 
+def test_dispatch_catches_reference_tricky_code():
+    for path in sorted(TASK_DIR.glob("task_pair_*.json")):
+        task = json.loads(path.read_text(encoding="utf-8"))
+        out = _run_dispatch({
+            "task_id": task["task_id"],
+            "task_description": task["task_description"],
+            "constraints": task["constraints"],
+            "code": task["tricky_code"],
+        })
+        assert out["verdict"] == "buggy", task["task_id"]
+        keys = _bug_keys(out)
+        truth = {
+            (int(b["line_start"]), str(b["type"]))
+            for b in task.get("bugs_in_tricky", [])
+        }
+        assert keys & truth, (task["task_id"], keys, truth)
+
+
 def test_dispatch_suppresses_known_family_probe_duplicates():
     for task_id in ("task_pair_004", "task_pair_005"):
         task = _load(task_id)
@@ -103,3 +128,29 @@ def test_hybrid_uses_candidate_bugs_for_unknown_clean_low_confidence():
     out = _run_dispatch(payload)
     assert out["verdict"] == "buggy"
     assert _bug_keys(out) == {(2, "logic_error")}
+
+
+def test_binary_search_while_lt_can_be_clean_when_exclusive_bound_consistent():
+    code = """def binary_search(arr, target):
+    lo, hi = 0, len(arr)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if arr[mid] < target:
+            lo = mid + 1
+        else:
+            hi = mid
+    if lo < len(arr) and arr[lo] == target:
+        return lo
+    return -1
+"""
+    out = _run_dispatch({
+        "task_id": "custom_binary_clean",
+        "task_description": (
+            "Implement binary_search(arr, target): given a sorted list, return the "
+            "0-based index of target if present, else -1. Empty array returns -1."
+        ),
+        "constraints": {"entry_function": "binary_search", "max_loc": 500, "imports_forbidden": []},
+        "code": code,
+    })
+    assert out["verdict"] == "clean"
+    assert out["bugs"] == []

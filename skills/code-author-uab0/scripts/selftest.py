@@ -261,6 +261,8 @@ def _merge_intervals_oracle(intervals: list[list[int]]) -> list[list[int]]:
 
 
 def _csv_oracle(line: str) -> list[str]:
+    if line == "":
+        return [""]
     return next(csv.reader([line]))
 
 

@@ -195,7 +195,9 @@ def _family_probes(task_description: str, entry: str) -> list[dict[str, Any]]:
         return [
             {"input": [[], 5], "expected": -1, "label": "empty array"},
             {"input": [[5], 5], "expected": 0, "label": "singleton present"},
+            {"input": [[1, 2], 1], "expected": 0, "label": "two elements first"},
             {"input": [[1, 2, 3, 4, 5], 5], "expected": 4, "label": "last element"},
+            {"input": [[1, 2, 3, 4, 5], 2], "expected": 1, "label": "lower half present"},
         ]
     if "parse_csv_line" in text or "csv" in text:
         return [

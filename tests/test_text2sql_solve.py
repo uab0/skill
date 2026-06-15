@@ -37,3 +37,14 @@ def test_solver_covers_basic_dev_set():
             run_sql(db_path, sql),
             run_sql(db_path, task["gold_sql"]),
         ), task["task_id"]
+
+
+def test_solver_does_not_high_confidence_match_count_perturbation():
+    solve = _load_solve()
+    task = json.loads((ROOT / "dev_set" / "basic" / "task_nl2sql_EXAMPLE.json").read_text(encoding="utf-8"))
+    sql, _, confidence = solve(
+        "How many students are in the CS department?",
+        task["db_schema"],
+    )
+    assert sql == ""
+    assert confidence < 0.85

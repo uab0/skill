@@ -1,11 +1,12 @@
 ---
 name: text2sql-uab0
-description: Convert a natural-language question + SQLite schema into a verified read-only SQL query. AIASE 2026 Basic Track.
-version: 0.3.0
+description: Must run the Text2SQL dispatcher to write AIASE_RESULT_PATH; never answer SQL directly in chat.
+version: 0.3.1
 metadata:
   hermes:
     tags: [sql, text2sql, data, aiase-2026]
     category: data
+    requires_toolsets: [terminal]
 ---
 
 # Text2SQL Skill
@@ -14,28 +15,51 @@ metadata:
 
 Use when the input JSON contains `task_id`, `question`, `db_schema`, and optionally `dialect`.
 
+## Output Contract
+
+- **Run the dispatcher first.**
+- Only the result file at `AIASE_RESULT_PATH` is consumed. Chat text is ignored.
+- **Do not place the final SQL, prose, plain JSON, YAML, tables, or Markdown fenced JSON in chat.**
+- **Send every candidate SQL back to the dispatcher before stopping.**
+- Use reasoning only when the dispatcher result is missing, empty, or low confidence.
+
 ## Procedure
 
-Run the dispatcher first:
+Follow this sequence exactly:
+
+1. First, run the dispatcher on the exact original input using this heredoc form. Use the skill directory path provided by Hermes as `<skill_dir>`:
 
 ```bash
-python skills/text2sql-uab0/scripts/dispatch.py <<'JSON'
+python3 <skill_dir>/scripts/dispatch.py <<'JSON'
 <INPUT_JSON>
 JSON
 ```
 
-If the returned fenced JSON has non-empty `sql` and `confidence >= 0.85`, return it unchanged.
+2. If the command fails and no result file is written, retry once using the same command pattern.
 
-If `sql` is empty or confidence is low, use the question and schema to draft one SQLite read-only `SELECT` query, then validate and format it by running:
+3. If the result file has non-empty `sql` and confidence is at least `0.85`, stop.
+
+4. Otherwise, draft exactly one SQLite read-only `SELECT` query from the original `question` and `db_schema`, then send it back to the dispatcher:
 
 ```bash
-python skills/text2sql-uab0/scripts/dispatch.py <<'JSON'
-{"task_id":"<same task_id>","question":"<same question>","db_schema":"<same db_schema>","candidate_sql":"<your SQL>"}
+python3 <skill_dir>/scripts/dispatch.py <<'JSON'
+{
+  "task_id": "<same task_id>",
+  "question": "<same question>",
+  "db_schema": "<same db_schema>",
+  "candidate_sql": "<your SQL>"
+}
 JSON
 ```
 
-Return only the final Markdown fenced ```json``` block printed by `dispatch.py`. Do not add prose, tables, YAML, or another fenced block.
+5. After the final dispatcher run writes the result file, stop.
+
+## Pitfalls
+
+- Do not bypass the dispatcher.
+- Do not invent tables, columns, values, or SQLite functions not supported by the schema and dialect.
+- SQL must be a single read-only SQLite query.
 
 ## Verification
 
-The final JSON object must contain `task_id`, `sql`, `rationale`, and `confidence`.
+The result file JSON must contain `task_id`, `sql`, `rationale`, and `confidence`. SQL must be a single read-only SQLite query.

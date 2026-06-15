@@ -1,11 +1,12 @@
 ---
 name: bug-hunter-uab0
-description: Find Python bugs with a deterministic dispatcher first; use bounded LLM candidate-bug review only when the dispatcher is clean and low-confidence.
-version: 0.4.1-hybrid
+description: Must run the Bug Hunter dispatcher to write AIASE_RESULT_PATH; only use bounded candidate review after a low-confidence clean result.
+version: 0.4.2-hybrid
 metadata:
   hermes:
     tags: [code, audit, aiase-2026]
     category: code
+    requires_toolsets: [terminal]
 ---
 
 # Bug Hunter Skill
@@ -14,26 +15,37 @@ metadata:
 
 Use when the input JSON contains `task_id`, `task_description`, and `code`, and the goal is to decide whether the code is buggy and report precise line-localized defects.
 
+## Output Contract
+
+- **Run the dispatcher first.**
+- Only the result file at `AIASE_RESULT_PATH` is consumed. Chat text is ignored.
+- **Do not review the code before the first dispatcher run.**
+- **Do not place prose, plain JSON, YAML, tables, or Markdown fenced JSON in chat as the final answer.**
+- **Send every candidate bug list back to the dispatcher before stopping.**
+- Use reasoning only when fallback is allowed by the dispatcher result.
+
 ## Procedure
 
-Do not review the code before the first tool call.
+Follow this sequence exactly:
 
-Run the dispatcher:
+1. First, run the dispatcher on the exact original input using this heredoc form. Use the skill directory path provided by Hermes as `<skill_dir>`:
 
 ```bash
-python skills/bug-hunter-uab0/scripts/dispatch.py <<'JSON'
+python3 <skill_dir>/scripts/dispatch.py <<'JSON'
 <INPUT_JSON>
 JSON
 ```
 
-If the dispatcher output has `verdict: "buggy"` or `confidence >= 0.75`, return that fenced JSON block verbatim and stop.
+2. If the command fails and no result file is written, retry once using the same command pattern.
 
-Only if the dispatcher output has both `verdict: "clean"` and `confidence < 0.75`, privately inspect the task description and code. Identify zero to three concrete bugs that violate the specification.
+3. Stop if `verdict == "buggy"` or confidence is at least `0.75`.
 
-Submit the fallback review to the dispatcher:
+4. Fallback is allowed only when `verdict == "clean"` and confidence is below `0.75`. Privately identify zero to three concrete spec-violating bugs. Do not report style issues, speculative bugs, or bugs without a concrete line range.
+
+5. Send candidates back to the dispatcher:
 
 ```bash
-python skills/bug-hunter-uab0/scripts/dispatch.py <<'JSON'
+python3 <skill_dir>/scripts/dispatch.py <<'JSON'
 {
   "original": <INPUT_JSON>,
   "mode": "hybrid",
@@ -51,10 +63,16 @@ python skills/bug-hunter-uab0/scripts/dispatch.py <<'JSON'
 JSON
 ```
 
-If you find no concrete bug, set `"candidate_bugs": []`. Never keep the example object.
+6. If no concrete bug is found, use `"candidate_bugs": []`; never keep the example object.
 
-Return only the final dispatcher's fenced JSON block. Do not add prose.
+7. After the final dispatcher run writes the result file, stop.
+
+## Pitfalls
+
+- Do not bypass the dispatcher.
+- Do not report style issues, speculative bugs, or bugs without a concrete line range.
+- Line numbers are 1-indexed, and clean code requires `"bugs": []`.
 
 ## Verification
 
-The final answer must be the single fenced JSON block printed by the dispatcher. It must contain `task_id`, `verdict`, `bugs`, and `confidence`. Each bug must use an allowed `severity` and `type`, and line numbers must be 1-indexed.
+The result file JSON must contain `task_id`, `verdict`, `bugs`, and `confidence`. Each bug must contain `line_start`, `line_end`, `severity`, `type`, `description`, and `suggested_fix`. Line numbers are 1-indexed. `verdict == "clean"` requires `"bugs": []`.

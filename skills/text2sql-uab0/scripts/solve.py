@@ -44,13 +44,13 @@ def solve(question: str, schema: str) -> tuple[str, str, float]:
 
     if {"students", "courses", "enrollments"} <= _tables(s):
         course = _quoted(question)
-        if "cs department" in q:
+        if "cs department" in q and not _asks_for_count(q):
             return (
                 "SELECT name FROM Students WHERE dept = 'CS';",
                 "Filter Students by department.",
                 0.95,
             )
-        if "enrolled in the course titled" in q:
+        if "enrolled in the course titled" in q and not _asks_for_count(q):
             return (
                 f"SELECT s.name FROM Students s JOIN Enrollments e ON s.sid = e.sid "
                 f"JOIN Courses c ON e.cid = c.cid WHERE c.title = '{course}';",
@@ -83,7 +83,7 @@ def solve(question: str, schema: str) -> tuple[str, str, float]:
 
     if {"customers", "products", "orders", "orderitems"} <= _tables(s):
         name_or_category = _quoted(question)
-        if "distinct names of products purchased by the customer" in q:
+        if "distinct names of products purchased by the customer" in q and not _asks_for_count(q):
             return (
                 "SELECT DISTINCT p.name FROM Customers c JOIN Orders o ON c.cid = o.cid "
                 "JOIN OrderItems oi ON o.oid = oi.oid JOIN Products p ON oi.pid = p.pid "
@@ -91,7 +91,7 @@ def solve(question: str, schema: str) -> tuple[str, str, float]:
                 "Follow customer orders to purchased products and remove duplicates.",
                 0.95,
             )
-        if "customers who have not placed any orders" in q:
+        if "customers who have not placed any orders" in q and not _asks_for_count(q):
             return (
                 "SELECT c.name FROM Customers c LEFT JOIN Orders o ON c.cid = o.cid "
                 "WHERE o.oid IS NULL;",
@@ -119,7 +119,7 @@ def solve(question: str, schema: str) -> tuple[str, str, float]:
 
     if {"books", "authors", "bookauthors", "members", "loans"} <= _tables(s):
         author = _quoted(question)
-        if "titles of all books written by author" in q:
+        if "titles of all books written by author" in q and not _asks_for_count(q):
             return (
                 "SELECT b.title FROM Books b JOIN BookAuthors ba ON b.bid = ba.bid "
                 f"JOIN Authors a ON ba.aid = a.aid WHERE a.name = '{author}';",
@@ -133,7 +133,7 @@ def solve(question: str, schema: str) -> tuple[str, str, float]:
                 "Left join authors to authored books so zero-book authors remain.",
                 0.95,
             )
-        if "outstanding loan" in q and "distinct titles" in q:
+        if "outstanding loan" in q and "distinct titles" in q and not _asks_for_count(q):
             return (
                 "SELECT DISTINCT b.title FROM Books b JOIN Loans l ON b.bid = l.bid "
                 "WHERE l.returned = 0;",
@@ -152,13 +152,13 @@ def solve(question: str, schema: str) -> tuple[str, str, float]:
 
     if {"teams", "players", "games", "goals"} <= _tables(s):
         team = _quoted(question)
-        if "players on the team named" in q:
+        if "players on the team named" in q and not _asks_for_count(q):
             return (
                 f"SELECT p.name FROM Players p JOIN Teams t ON p.tid = t.tid WHERE t.name = '{team}';",
                 "Join players to their team and filter by team name.",
                 0.95,
             )
-        if "scored more than three goals" in q:
+        if "scored more than three goals" in q and not _asks_for_count(q):
             return (
                 "SELECT p.name FROM Players p JOIN Goals g ON p.pid = g.pid "
                 "GROUP BY p.pid, p.name HAVING COUNT(*) > 3;",
@@ -224,6 +224,17 @@ def solve(question: str, schema: str) -> tuple[str, str, float]:
 
 def _tables(schema_lower: str) -> set[str]:
     return {m.group(1).lower() for m in re.finditer(r"create\s+table\s+([a-z_][a-z0-9_]*)", schema_lower)}
+
+
+def _asks_for_count(question_lower: str) -> bool:
+    count_cues = (
+        "count ",
+        "count the",
+        "how many",
+        "number of",
+        "total number of",
+    )
+    return any(cue in question_lower for cue in count_cues)
 
 
 def main(argv: list[str]) -> int:

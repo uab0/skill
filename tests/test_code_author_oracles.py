@@ -23,6 +23,7 @@ def test_parse_csv_samples_use_csv_oracle():
     samples = st.generated_samples("Implement parse_csv_line(line)", "parse_csv_line")
     labels = {s["label"] for s in samples}
     assert {"trailing comma", "quoted empty", "escaped quote"} <= labels
+    assert any(s["input"] == [""] and s["expected"] == [""] for s in samples)
     assert any(s["input"] == ["a,b,"] and s["expected"] == ["a", "b", ""] for s in samples)
 
 

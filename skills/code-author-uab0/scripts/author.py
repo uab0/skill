@@ -81,12 +81,13 @@ def _template(entry: str, description: str) -> tuple[str, str, float]:
         return f"""def {entry}(m, n):
     if m <= 0 or n <= 0:
         return 0
-    dp = [[1] * n for _ in range(m)]
-    for i in range(1, m):
-        for j in range(1, n):
-            dp[i][j] = dp[i - 1][j] + dp[i][j - 1]
-    return dp[m - 1][n - 1]
-""", "Use a small DP table; zero dimensions return 0 and first row/column have one path.", 0.85
+    steps = m + n - 2
+    choose = min(m - 1, n - 1)
+    result = 1
+    for i in range(1, choose + 1):
+        result = result * (steps - choose + i) // i
+    return result
+""", "Use the binomial coefficient C(m+n-2, m-1), avoiding large DP tables.", 0.9
     if "kth_smallest" in text or "k-th smallest" in text or "kth smallest" in text:
         return f"""def {entry}(nums, k):
     if not nums or k < 1 or k > len(nums):
