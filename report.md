@@ -95,6 +95,8 @@ Open Track 是可驗證的統計分析 skill。輸入自然語言問題與 JSON 
 
 ## 5. 最終自測摘要
 
+註：`pytest` 並未寫入課程評分標準，而是本 repo 的本地 regression tests。因課程規則中途改為 file-based output，加上官方提供之改版後 `run_dev.py` 與其需求檔案結構存在差異，因此本 repo 另加入 result-file contract、dispatcher 與邊界案例測試；`run_dev.py` 保留本地測試 helper，但核心結果讀取與 Basic 比對仍使用 `aiase_contract.py`。若直接置換為其他版本的 `run_dev.py`，`pytest` 結果可能不同；以下僅作為本地驗證參考。
+
 - `pytest -q`：`224 passed, 1 skipped`。
 - `python verify_repo.py --github-id uab0`：`31/31 passed`。
 - `python run_dev.py --check-only`：Basic dev DB 與 Pairwise reference tasks 檢查通過，`0 issue(s)`。
